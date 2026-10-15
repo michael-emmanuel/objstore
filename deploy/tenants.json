@@ -1,0 +1,13 @@
+[
+  {"id": "alice", "token_env": "OBJSTORE_TOKEN_ALICE",
+   "limits": {"max_storage_bytes": 10737418240, "max_object_bytes": 5368709120,
+              "upload_bytes_per_sec": 209715200, "download_bytes_per_sec": 419430400,
+              "requests_per_sec": 5000, "request_burst": 10000,
+              "max_concurrent_uploads": 64, "max_concurrent_downloads": 256}},
+  {"id": "bob", "token_env": "OBJSTORE_TOKEN_BOB",
+   "limits": {"max_storage_bytes": 104857600, "max_object_bytes": 10485760,
+              "upload_bytes_per_sec": 1048576, "download_bytes_per_sec": 2097152,
+              "requests_per_sec": 20, "request_burst": 20,
+              "max_concurrent_uploads": 2, "max_concurrent_downloads": 4}},
+  {"id": "admin", "token_env": "OBJSTORE_TOKEN_ADMIN", "admin": true, "limits": {}}
+]

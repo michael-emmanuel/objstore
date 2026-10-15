@@ -1,0 +1,15 @@
+# Local cluster state and generated secrets
+/.local/
+/deploy/.env
+/bin/
+*.prof
+*.test
+coverage.out
+
+# Binaries built at the repo root by `go build ./cmd/<name>`
+/gateway
+/metadata
+/storage-node
+/repairer
+/rebalancer
+/loadgen

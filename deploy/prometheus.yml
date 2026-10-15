@@ -1,0 +1,10 @@
+# Scrapes every component. /metrics is exempt from cluster authentication.
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: gateway
+    static_configs: [{targets: ["gateway:8080"]}]
+  - job_name: storage
+    static_configs: [{targets: ["node-1:8100", "node-2:8100", "node-3:8100", "node-4:8100", "node-5:8100"]}]
+  - job_name: workers
+    static_configs: [{targets: ["repairer:9100", "rebalancer:9200"]}]

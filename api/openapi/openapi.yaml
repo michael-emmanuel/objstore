@@ -1,0 +1,317 @@
+openapi: 3.0.3
+info:
+  title: Distributed Object Storage - Gateway API
+  version: "1.0"
+  description: |
+    Public API served by the gateway. Object bodies are streamed in both
+    directions; the gateway never buffers a whole object except small objects
+    eligible for the hot-object cache.
+
+    Authentication: `Authorization: Bearer <token>`. Tokens map to tenants
+    (see deploy/tenants.json); buckets belong to exactly one tenant.
+    Errors use the body `{"error": {"code", "message", "request_id"}}` and
+    every response carries `X-Request-Id`.
+
+    Internal APIs (storage nodes, metadata shards, coordinator) are not part
+    of this contract; they require the cluster token (`X-Cluster-Token`).
+servers:
+  - url: http://localhost:8080
+security:
+  - bearer: []
+
+paths:
+  /v1/buckets/{bucket}:
+    parameters: [{$ref: "#/components/parameters/bucket"}]
+    put:
+      summary: Create a bucket
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/BucketOptions"}
+      responses:
+        "200": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Bucket"}}}}
+        "409": {$ref: "#/components/responses/Error"}
+    get:
+      summary: Get bucket configuration
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/Bucket"}}}}
+        "404": {$ref: "#/components/responses/Error"}
+
+  /v1/buckets/{bucket}/objects/{key}:
+    parameters:
+      - $ref: "#/components/parameters/bucket"
+      - name: key
+        in: path
+        required: true
+        description: Any UTF-8 string up to 1024 bytes without control characters. May contain '/'. Never used as a filesystem path.
+        schema: {type: string}
+    put:
+      summary: Upload an object (streamed; creates a new version)
+      description: |
+        Succeeds once every segment is durably committed on at least W replicas
+        and the version is committed to metadata. `X-Replicas-Acked` reports the
+        minimum acks across segments; fewer than RF means repair will restore
+        the remaining replicas.
+      parameters:
+        - {name: Content-Type, in: header, schema: {type: string}}
+        - {name: X-Checksum-SHA256, in: header, description: Expected hex SHA-256 of the body; mismatch fails with BadDigest and nothing becomes visible., schema: {type: string}}
+        - {name: X-Meta-*, in: header, description: User metadata (max 16 entries / 2 KiB)., schema: {type: string}}
+      requestBody:
+        required: true
+        content: {application/octet-stream: {schema: {type: string, format: binary}}}
+      responses:
+        "200":
+          description: Committed
+          headers:
+            ETag: {schema: {type: string}}
+            X-Version-Id: {schema: {type: string}}
+            X-Replicas-Acked: {schema: {type: string}, description: "e.g. 2/3"}
+          content: {application/json: {schema: {$ref: "#/components/schemas/PutResult"}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "413": {$ref: "#/components/responses/Error"}
+        "429": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+    get:
+      summary: Download an object (streamed; supports a single byte Range)
+      parameters:
+        - {name: version_id, in: query, schema: {type: string}}
+        - {name: consistency, in: query, description: "`quorum` verifies that R replicas hold a matching copy before serving.", schema: {type: string, enum: [quorum]}}
+        - {name: Range, in: header, schema: {type: string, example: "bytes=1000000-2000000"}}
+        - {name: If-None-Match, in: header, schema: {type: string}}
+      responses:
+        "200":
+          description: Object bytes
+          headers:
+            ETag: {schema: {type: string}}
+            X-Version-Id: {schema: {type: string}}
+            X-Cache: {schema: {type: string, enum: [HIT, MISS, COALESCED]}, description: Hot-object cache outcome (small objects only).}
+          content: {application/octet-stream: {schema: {type: string, format: binary}}}
+        "206": {description: Partial content}
+        "304": {description: Not modified}
+        "404": {$ref: "#/components/responses/Error"}
+        "416": {description: Range not satisfiable}
+        "503": {$ref: "#/components/responses/Error"}
+    head:
+      summary: Object metadata without the body
+      responses:
+        "200": {description: OK}
+        "404": {description: Not found}
+    delete:
+      summary: Delete (adds a delete marker) or permanently delete one version
+      description: Without version_id, a delete marker becomes the latest version; data is reclaimed later by GC. Idempotent.
+      parameters:
+        - {name: version_id, in: query, schema: {type: string}}
+      responses:
+        "204": {description: Deleted}
+
+  /v1/buckets/{bucket}/versions/{key}:
+    parameters:
+      - $ref: "#/components/parameters/bucket"
+      - {name: key, in: path, required: true, schema: {type: string}}
+    get:
+      summary: List all versions of a key, newest first
+      responses:
+        "200": {description: OK}
+
+  /v1/buckets/{bucket}/objects:
+    parameters: [{$ref: "#/components/parameters/bucket"}]
+    get:
+      summary: List current objects (paginated, ordered by key)
+      parameters:
+        - {name: prefix, in: query, schema: {type: string}}
+        - {name: delimiter, in: query, schema: {type: string}, description: Group keys into common_prefixes (e.g. "/").}
+        - {name: max_keys, in: query, schema: {type: integer, maximum: 1000, default: 1000}}
+        - {name: continuation_token, in: query, schema: {type: string}}
+        - {name: start_after, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  objects: {type: array, items: {type: object}}
+                  common_prefixes: {type: array, items: {type: string}}
+                  is_truncated: {type: boolean}
+                  next_continuation_token: {type: string}
+
+  /v1/buckets/{bucket}/multipart:
+    parameters: [{$ref: "#/components/parameters/bucket"}]
+    post:
+      summary: Initiate a multipart upload
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                key: {type: string}
+                content_type: {type: string}
+                metadata: {type: object, additionalProperties: {type: string}}
+      responses:
+        "200":
+          description: Upload created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upload_id: {type: string}
+                  min_part_size: {type: integer}
+                  max_part_size: {type: integer}
+
+  /v1/multipart/{upload_id}:
+    parameters: [{$ref: "#/components/parameters/upload_id"}]
+    get:
+      summary: Show an upload and its parts
+      responses: {"200": {description: OK}}
+    delete:
+      summary: Abort an upload (parts are reclaimed by GC)
+      responses: {"204": {description: Aborted}}
+
+  /v1/multipart/{upload_id}/parts:
+    parameters: [{$ref: "#/components/parameters/upload_id"}]
+    post:
+      summary: Upload (or re-upload) one part
+      description: Re-uploading a part number replaces the earlier attempt; only the failed part needs retrying.
+      parameters:
+        - {name: part_number, in: query, required: true, schema: {type: integer, minimum: 1, maximum: 10000}}
+        - {name: X-Checksum-SHA256, in: header, schema: {type: string}}
+      requestBody:
+        required: true
+        content: {application/octet-stream: {schema: {type: string, format: binary}}}
+      responses:
+        "200": {description: Part stored, content: {application/json: {schema: {$ref: "#/components/schemas/PutResult"}}}}
+
+  /v1/multipart/{upload_id}/complete:
+    parameters: [{$ref: "#/components/parameters/upload_id"}]
+    post:
+      summary: Complete an upload; the object becomes visible atomically
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                parts:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      part_number: {type: integer}
+                      etag: {type: string, description: SHA-256 returned by the part upload}
+      responses:
+        "200": {description: Completed; ETag is sha256(concat(part sha256s))-N}
+        "400": {$ref: "#/components/responses/Error"}
+
+  /admin/cluster:
+    get:
+      summary: Membership view (admin tenant only)
+      responses: {"200": {description: OK}}
+  /admin/nodes/{id}/state:
+    post:
+      summary: Set a node's operator state (ACTIVE, DRAINING, DECOMMISSIONED)
+      description: DECOMMISSIONED is refused while the node still holds referenced replicas, unless force=true.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: force, in: query, schema: {type: boolean}}
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {state: {type: string}}}
+      responses: {"204": {description: Updated}, "409": {description: Node not drained}}
+  /admin/nodes/{id}/drain:
+    get:
+      summary: Drain progress (referenced replicas remaining, safe_to_remove)
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: OK}}
+  /admin/objects/{bucket}/{key}:
+    get:
+      summary: Inspect an object's metadata, replicas and desired placement
+      parameters:
+        - $ref: "#/components/parameters/bucket"
+        - {name: key, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: OK}}
+  /admin/stats:
+    get:
+      summary: Per-shard metadata statistics
+      responses: {"200": {description: OK}}
+  /metrics:
+    get:
+      security: []
+      summary: Prometheus metrics
+      responses: {"200": {description: OK}}
+  /healthz:
+    get:
+      security: []
+      summary: Liveness
+      responses: {"200": {description: OK}}
+
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer}
+  parameters:
+    bucket:
+      name: bucket
+      in: path
+      required: true
+      description: 3-63 chars, lowercase letters, digits, '-' and '.'.
+      schema: {type: string}
+    upload_id:
+      name: upload_id
+      in: path
+      required: true
+      description: "<bucket>~<random>; the bucket prefix routes the call to the owning metadata shard."
+      schema: {type: string}
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    enum: [BadDigest, IncompleteBody, InvalidArgument, InvalidPart, BucketAlreadyExists, AccessDenied,
+                           QuotaExceeded, NoSuchBucket, NoSuchKey, NoSuchUpload, EntityTooLarge, DataUnavailable,
+                           InsufficientReplicas, MetadataUnavailable, SlowDown, Unauthenticated]
+                  message: {type: string}
+                  request_id: {type: string}
+  schemas:
+    BucketOptions:
+      type: object
+      properties:
+        versioning: {type: boolean}
+        public_read: {type: boolean}
+        replication_factor: {type: integer, minimum: 1, default: 3}
+        storage_class: {type: string, enum: [STANDARD, REDUCED_REDUNDANCY]}
+    Bucket:
+      allOf:
+        - $ref: "#/components/schemas/BucketOptions"
+        - type: object
+          properties:
+            name: {type: string}
+            tenant: {type: string}
+            created_at: {type: string, format: date-time}
+    PutResult:
+      type: object
+      properties:
+        bucket: {type: string}
+        key: {type: string}
+        version_id: {type: string}
+        part_number: {type: integer}
+        etag: {type: string}
+        size: {type: integer}
+        segments: {type: integer}
+        replication_factor: {type: integer}
+        write_quorum: {type: integer}
+        min_replicas_acked: {type: integer}
+        under_replicated: {type: boolean}
