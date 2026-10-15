@@ -147,7 +147,7 @@ and the hash cannot be dropped without losing end-to-end integrity.
 | Drain of a node with 49 replicas | ~35 s to `safe_to_remove` |
 | Slow replica (one node delayed 500 ms per 64 KiB chunk, stall timeout 200 ms) | 24 MiB PUT in 0.30 s, acked 2/3; the slow replica was dropped, not waited for (integration test) |
 | Slow node on the live cluster (300 ms per 64 KiB), 200 MB PUT, 16 MiB segments | **41.6 s before the fix** (8 segments x 5 s stall timeout); **6.9 s after** adding the gateway's slow-node penalty (1 stall, then the node is avoided). Gateway RSS 15-18 MB in both |
-| Slow node, 8 MiB in 16 small segments (straggler path) | 6.5 s without penalty vs 0.49 s with (`TestSlowNodePenalizedAcrossSegments`) |
+| Slow node, 8 MiB in 16 small segments (straggler path) | slow node asked to store 16 of 16 segments without the penalty vs 1 of 16 with it; ~6.6 s vs ~0.65 s on this VM, but the test asserts on the write count because timings vary widely on shared CI runners (`TestSlowNodePenalizedAcrossSegments`) |
 | Corruption: flip one byte, then read | read succeeded via mid-stream failover; repaired within ~160 ms |
 
 ## Discussion

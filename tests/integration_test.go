@@ -14,6 +14,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -887,38 +888,86 @@ func TestBackpressureSlowReplica(t *testing.T) {
 }
 
 // A node that is alive but slow stays ACTIVE in membership. Without a
-// penalty, every segment placed on it pays the full stall timeout before the
-// replica is dropped (found on the local cluster: a 200 MB upload took 41.6 s
-// with one slow node). With the gateway's slow-node penalty, only the first
-// segment pays; later segments avoid the node.
+// penalty, every segment placed on it pays the full stall or straggler
+// timeout (found on the local cluster: a 200 MB upload took 41.6 s with one
+// slow node). With the gateway's slow-node penalty, later segments avoid it.
+//
+// The assertion counts how many segment writes the slow node was asked to
+// take, not wall-clock time: timing ratios proved flaky on shared CI runners,
+// where healthy nodes can straggle too. (That CI failure also exposed a real
+// bug, see TestPlaceReadmitsLeastPenalizedFirst in internal/api.)
 func TestSlowNodePenalizedAcrossSegments(t *testing.T) {
-	run := func(penalty time.Duration) time.Duration {
+	const segments = 16
+	run := func(penalty time.Duration) (putsToSlow int, elapsed time.Duration) {
 		c := testcluster.Start(t, testcluster.Options{Nodes: 4, Gateway: api.Config{SegmentSize: 512 << 10,
 			StallTimeout: 300 * time.Millisecond, StragglerTimeout: 400 * time.Millisecond, QueueDepth: 2, ChunkSize: 64 << 10,
 			SlowNodePenalty: penalty}})
 		c.Alice.CreateBucket(ctx, "b-1", client.BucketOptions{})
 		slow := c.Nodes[1]
 		slow.Server.SetFaults(storagenode.Faults{ChunkDelayMS: 500})
-		defer slow.Server.SetFaults(storagenode.Faults{})
-		data := payload(8<<20, 11) // 16 segments
+		data := payload(segments*(512<<10), 11)
 		start := time.Now()
 		r := put(t, c.Alice, "b-1", "k", data)
-		elapsed := time.Since(start)
-		if r.MinReplicasAcked < 2 {
+		elapsed = time.Since(start)
+		slow.Server.SetFaults(storagenode.Faults{}) // let aborted handlers finish quickly
+		if r.MinReplicasAcked < 2 || r.Segments != segments {
 			t.Fatalf("%+v", r)
 		}
 		got, _ := get(t, c.Alice, "b-1", "k", client.GetOptions{})
 		if !bytes.Equal(got, data) {
 			t.Fatal("content mismatch")
 		}
-		return elapsed
+		// A PUT is counted when the node's handler returns. A write the
+		// gateway abandoned as a straggler still finishes on the node (its
+		// body is already in socket buffers), but only after any in-progress
+		// 500 ms chunk delay. Sample at intervals longer than that until the
+		// count is stable.
+		prev := -1
+		c.WaitFor("slow node handlers to finish", func() bool {
+			time.Sleep(700 * time.Millisecond)
+			n := nodePutCount(t, slow.TS.URL)
+			stable := n == prev
+			prev = n
+			return stable
+		})
+		return prev, elapsed
 	}
-	without := run(-1)
-	with := run(time.Minute)
-	t.Logf("8 MiB in 16 segments with one slow node: penalty off %v, penalty on %v", without, with)
-	if with*2 > without {
-		t.Fatalf("penalty should avoid repeated stalls: off=%v on=%v", without, with)
+	offPuts, offTime := run(-1)
+	onPuts, onTime := run(time.Minute)
+	t.Logf("%d segments, one slow node: penalty off -> %d writes to the slow node (%v); penalty on -> %d (%v)",
+		segments, offPuts, offTime, onPuts, onTime)
+	// The test cluster's zones are a, b, c, a, so the slow node (the only
+	// az-b node) is in every zone-diverse placement: without the penalty it
+	// receives all 16 segment writes. With the penalty it should receive the
+	// first one only; a few extra are tolerated in case healthy nodes are
+	// also penalized under load.
+	if onPuts > 4 || onPuts >= offPuts {
+		t.Fatalf("penalty should keep the slow node out of later placements: off=%d on=%d", offPuts, onPuts)
 	}
+}
+
+// nodePutCount sums storage_node_ops_total{op="put"} on one storage node.
+func nodePutCount(t *testing.T, base string) int {
+	t.Helper()
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	total := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, `storage_node_ops_total{op="put"`) {
+			continue
+		}
+		f := strings.Fields(line)
+		v, err := strconv.ParseFloat(f[len(f)-1], 64)
+		if err != nil {
+			t.Fatalf("bad metric line %q", line)
+		}
+		total += int(v)
+	}
+	return total
 }
 
 // A node that was declared DOWN and repaired around comes back with its old

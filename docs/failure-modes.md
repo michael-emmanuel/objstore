@@ -67,7 +67,7 @@ Defaults referenced below: RF=3, W=2, suspect after 3 s, DOWN after 10 s
 | Field | |
 |---|---|
 | Detection | Error or non-matching checksum from the replica's PUT; or the replica's queue stays full for `-replica-stall-timeout`; or it acks more than `-straggler-timeout` after the W-th ack. |
-| Recovery | The replica is dropped and its request cancelled (no clean EOF, so it cannot commit a truncated blob). The write continues with the rest. A node dropped for stalling or straggling is penalized by that gateway for `-slow-node-penalty`: new segments avoid it when RF other writable nodes exist, so a slow node costs one timeout, not one per segment. |
+| Recovery | The replica is dropped and its request cancelled (no clean EOF, so it cannot commit a truncated blob). The write continues with the rest. A node dropped for stalling or straggling is penalized by that gateway for `-slow-node-penalty`: new segments avoid it, so a slow node costs one timeout, not one per segment. If avoiding every penalized node would leave fewer than RF candidates, penalized nodes are re-admitted one at a time, fewest strikes first (a node gains a strike each time it is slow again), so one false positive on a healthy node does not let a persistently slow node back in. |
 | Data loss risk | None for acknowledged writes (W copies). |
 | Availability impact | If fewer than W replicas remain, the write fails with 503 `InsufficientReplicas`. |
 | Consistency impact | None. Metadata lists only acknowledged replicas. |

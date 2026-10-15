@@ -55,12 +55,9 @@ type putResult struct {
 func (g *Gateway) writeBlob(ctx context.Context, bucket, blobID string, rf int, src io.Reader) (replication.Result, error) {
 	ctx, span := g.tracer.Start(ctx, "write_blob", "blob", blobID, "rf", rf)
 	m := g.members.Map()
-	nodes, err := m.PlaceExcluding(blobID, rf, g.slow.excluded())
-	if len(nodes) < rf {
-		// Penalized nodes are a performance preference, never a reason to
-		// write fewer replicas: fall back to normal placement.
-		nodes, err = m.Place(blobID, rf)
-	}
+	// Penalized (recently slow) nodes are a performance preference, never a
+	// reason to write fewer replicas: slowNodes.place re-admits them as needed.
+	nodes, err := g.slow.place(m, blobID, rf)
 	w := g.writeQuorum(rf)
 	if len(nodes) < w {
 		span.End(err)

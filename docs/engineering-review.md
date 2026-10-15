@@ -1,15 +1,5 @@
 # Engineering Review
 
-Written for senior and staff-level distributed-systems interviews. It
-assumes you built or read this repository; every answer is anchored in what
-the code does and what it deliberately does not do. Saying "this project does
-X; production would do Y because Z" is a strong answer. Claiming the project
-does Y is not.
-
-Each question lists what the interviewer is **testing**, a **strong answer**,
-a **deeper follow-up** to expect, a **common weak answer**, and the
-**relevant tradeoff**.
-
 Contents: A 30-second · B 2-minute · C 10-minute walkthrough ·
 D Data plane · E Metadata plane · F Storage · G Replication ·
 H Consistency · I Failure modes · J Scaling · K Performance ·
